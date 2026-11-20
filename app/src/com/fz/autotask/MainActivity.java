@@ -55,6 +55,9 @@ public class MainActivity extends Activity {
     private final java.util.Map<String, String[]> travelCache = new java.util.HashMap<>();
     /** uid -> {今日活跃分, 本月活跃天数}（火焰图标用） */
     private final java.util.Map<String, int[]> actCache = new java.util.HashMap<>();
+    /** 正在跑的模块 id / 账号 uid：对应卡片上转圈，跑完清掉。 */
+    private final java.util.Set<String> runningModules = new java.util.HashSet<>();
+    private final java.util.Set<String> runningAccounts = new java.util.HashSet<>();
     private boolean refreshingHome = false;
     private EditText homeSearch;
     private Button homeSelAll;
@@ -213,6 +216,19 @@ public class MainActivity extends Activity {
                 headPart = headPart.substring(cut + 2);
             }
             String first = bar > 0 ? lr.substring(bar + 3) : "";
+            // 每个模块只留「均已签」这种主结论，后面的旅行/活跃明细剪掉，
+            // 否则模块一多这一行就爆炸（完整内容在通知和 run.log 里）
+            if (!first.isEmpty()) {
+                StringBuilder brief2 = new StringBuilder();
+                for (String seg : first.split(" \\| ")) {
+                    if (brief2.length() > 0) {
+                        brief2.append(" · ");
+                    }
+                    int sem = seg.indexOf('；');
+                    brief2.append(sem > 0 ? seg.substring(0, sem) : seg);
+                }
+                first = brief2.toString();
+            }
             lastRun.setText("上次运行 " + headPart + (first.length() > 0 ? "  ·  " + first : ""));
         }
         lastRun.setTextColor(0xFF7A818C);
@@ -306,6 +322,12 @@ public class MainActivity extends Activity {
                     return;
                 }
                 final java.util.ArrayList<String> picked = new java.util.ArrayList<>(modSelected);
+                // 先把转圈挂上，再开线程
+                runningModules.clear();
+                runningModules.addAll(picked);
+                refreshingHome = true;
+                showHome();
+                refreshingHome = false;
                 toast("已开始跑选中的 " + picked.size() + " 个模块");
                 new Thread(new Runnable() {
                     @Override
@@ -314,7 +336,13 @@ public class MainActivity extends Activity {
                         runOnUiThread(new Runnable() {
                             @Override
                             public void run() {
-                                toast("跑完了");
+                                runningModules.clear();
+                                if (onHome) {
+                                    refreshingHome = true;
+                                    showHome();
+                                    refreshingHome = false;
+                                }
+                                toast("签到成功");
                                 loadStats(true);   // 跑完必须强制刷新，否则卡片上的签到/积分还是旧值
                             }
                         });
@@ -1065,6 +1093,13 @@ public class MainActivity extends Activity {
             badgeFg = 0xFFB4453C;
             badgeBg = 0xFFFCEDEC;
         }
+        // 这个账号正在跑：徽章左边转圈
+        if (runningAccounts.contains(uid)) {
+            android.widget.ProgressBar pb = spinner();
+            LinearLayout.LayoutParams plp = new LinearLayout.LayoutParams(dp(16), dp(16));
+            plp.rightMargin = dp(6);
+            row.addView(pb, plp);
+        }
         row.addView(pill(badgeText, badgeFg, badgeBg));
         card.addView(row);
 
@@ -1184,6 +1219,12 @@ public class MainActivity extends Activity {
         list.clear();
         list.addAll(picked);
         toast("正在跑选中的 " + list.size() + " 个账号（签到 + 旅行 + 活跃）…");
+        // 先给每张账号卡挂上转圈
+        runningAccounts.clear();
+        for (com.fz.autotask.modules.workbuddy.WorkBuddyAccount a : list) {
+            runningAccounts.add(a.uid);
+        }
+        renderAccounts();
         new Thread(new Runnable() {
             @Override
             public void run() {
@@ -1288,6 +1329,7 @@ public class MainActivity extends Activity {
                 runOnUiThread(new Runnable() {
                     @Override
                     public void run() {
+                        runningAccounts.clear();
                         toast(brief);
                         new android.app.AlertDialog.Builder(MainActivity.this)
                                 .setTitle("本次结果")
@@ -1329,6 +1371,38 @@ public class MainActivity extends Activity {
                     }
                 });
         fetchTravelInto(body, uid, a);
+    }
+
+    /** 首页火焰：所有账号合计的活跃明细。 */
+    private void showActivityTotal() {
+        int days = activityDays();
+        int full = activityFullDays();
+        int n = 0;
+        StringBuilder b = new StringBuilder();
+        b.append("本月活跃合计：").append(days).append(" / ").append(full).append(" 天\n\n");
+        org.json.JSONArray arr = cfg.wbAccounts();
+        for (int i = 0; i < arr.length(); i++) {
+            JSONObject o = arr.optJSONObject(i);
+            if (o == null) {
+                continue;
+            }
+            n++;
+            String uid = str(o, "uid");
+            String lb = str(o, "label");
+            int[] act = actCache.get(uid);
+            b.append("· ").append(lb.isEmpty() ? "账号 " + n : lb).append("：");
+            if (act == null) {
+                b.append("查询中 / 未读\n");
+            } else {
+                b.append("本月 ").append(act[1]).append(" 天，今日 ").append(act[0]).append(" 分\n");
+            }
+        }
+        b.append("\n火焰 = 各账号本月活跃天数相加 ÷（账号数 × 当月天数）。");
+        new android.app.AlertDialog.Builder(this)
+                .setTitle("🔥 活跃（合计）")
+                .setMessage(b.toString())
+                .setPositiveButton("关闭", null)
+                .show();
     }
 
     /** 点 / 长按火焰：查一次活跃明细。 */
@@ -1467,10 +1541,22 @@ public class MainActivity extends Activity {
         int cq = dp(14);
         card.setPadding(cq, cq, cq, cq);
 
+        LinearLayout titleRow = new LinearLayout(this);
+        titleRow.setOrientation(LinearLayout.HORIZONTAL);
+        titleRow.setGravity(android.view.Gravity.CENTER_VERTICAL);
         TextView nm = new TextView(this);
         nm.setText(m.name());
         nm.setTextSize(17);
-        card.addView(nm);
+        titleRow.addView(nm, new LinearLayout.LayoutParams(0,
+                LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        if (runningModules.contains(m.id())) {
+            android.widget.ProgressBar pb = spinner();
+            LinearLayout.LayoutParams plp =
+                    new LinearLayout.LayoutParams(dp(18), dp(18));
+            plp.leftMargin = dp(6);
+            titleRow.addView(pb, plp);
+        }
+        card.addView(titleRow);
 
         TextView ds = new TextView(this);
         ds.setText(m.description());
@@ -1528,6 +1614,27 @@ public class MainActivity extends Activity {
             chips.addView(pill(travelOn ? ("🛫 旅行 " + traveling + " 只") : "🛫 未出行",
                     travelOn ? 0xFF1E9E58 : 0xFF8A8F98,
                     travelOn ? 0xFFE8F6EE : 0xFFF2F3F5));
+
+            // 活跃度火焰（按所有账号合计）：2 个号 = 60 天满
+            final FlameView mf = new FlameView(this);
+            LinearLayout.LayoutParams mflp = new LinearLayout.LayoutParams(dp(20), dp(22));
+            mflp.leftMargin = dp(8);
+            mf.setLayoutParams(mflp);
+            mf.setProgress(Math.min(1f, activityDays() / (float) activityFullDays()));
+            mf.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    showActivityTotal();
+                }
+            });
+            mf.setOnLongClickListener(new View.OnLongClickListener() {
+                @Override
+                public boolean onLongClick(View v) {
+                    showActivityTotal();
+                    return true;
+                }
+            });
+            chips.addView(mf);
             card.addView(chips);
         }
 
@@ -1551,6 +1658,11 @@ public class MainActivity extends Activity {
                 toast("开始运行…");
                 final java.util.ArrayList<String> only = new java.util.ArrayList<>();
                 only.add(m.id());
+                runningModules.clear();
+                runningModules.add(m.id());
+                refreshingHome = true;
+                showHome();
+                refreshingHome = false;
                 new Thread(new Runnable() {
                     @Override
                     public void run() {
@@ -1561,8 +1673,14 @@ public class MainActivity extends Activity {
                         runOnUiThread(new Runnable() {
                             @Override
                             public void run() {
+                                runningModules.clear();
                                 String last = cfg.lastResult();
                                 toast(last.isEmpty() ? "运行结束" : last.split("\n")[0]);
+                                if (onHome) {
+                                    refreshingHome = true;
+                                    showHome();
+                                    refreshingHome = false;
+                                }
                             }
                         });
                     }
@@ -1578,6 +1696,48 @@ public class MainActivity extends Activity {
     /** 旅行 / 活跃是 WorkBuddy 模块的子任务，不出现在首页模块列表里。 */
     private static boolean isSubModule(String id) {
         return "workbuddy-travel".equals(id) || "workbuddy-activity".equals(id);
+    }
+
+    /** 火焰满格基准 = 账号数 × 当月天数（2 个号就是 60 天）。 */
+    private int activityFullDays() {
+        int n = 0;
+        org.json.JSONArray arr = cfg.wbAccounts();
+        for (int i = 0; i < arr.length(); i++) {
+            if (arr.optJSONObject(i) != null) {
+                n++;
+            }
+        }
+        int dim = java.util.Calendar.getInstance()
+                .getActualMaximum(java.util.Calendar.DAY_OF_MONTH);
+        return Math.max(1, n * dim);
+    }
+
+    /** 所有账号本月活跃天数之和。 */
+    private int activityDays() {
+        int days = 0;
+        org.json.JSONArray arr = cfg.wbAccounts();
+        for (int i = 0; i < arr.length(); i++) {
+            org.json.JSONObject o = arr.optJSONObject(i);
+            if (o == null) {
+                continue;
+            }
+            int[] act = actCache.get(str(o, "uid"));
+            if (act != null) {
+                days += act[1];
+            }
+        }
+        return days;
+    }
+
+    private android.widget.ProgressBar spinner() {
+        android.widget.ProgressBar pb =
+                new android.widget.ProgressBar(this, null, android.R.attr.progressBarStyleSmall);
+        pb.setIndeterminate(true);
+        return pb;
+    }
+
+    private void dp(View v, int w, int h) {
+        v.setLayoutParams(new LinearLayout.LayoutParams(dp(w), dp(h)));
     }
 
     private java.util.List<String> visibleModuleIds() {

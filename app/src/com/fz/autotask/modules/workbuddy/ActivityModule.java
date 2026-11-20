@@ -56,8 +56,8 @@ public final class ActivityModule implements Module {
         final int count = cfg.reportCount();
         int okCount = 0;
         int sentTotal = 0;
-        int streak = 0;
-        int monthDays = 0;
+        int monthTotal = 0;             // 各账号本月活跃天数之和（火焰按这个算）
+        StringBuilder streaks = new StringBuilder();   // 各账号连登，逐个别相加
         StringBuilder err = new StringBuilder();
         JSONArray updated = new JSONArray();
 
@@ -71,12 +71,11 @@ public final class ActivityModule implements Module {
             sentTotal += r.sent;
             if (r.sent > 0) {
                 okCount++;
-            }
-            if (r.streak > streak) {
-                streak = r.streak;
-            }
-            if (r.monthDays > monthDays) {
-                monthDays = r.monthDays;
+                monthTotal += r.monthDays;
+                if (streaks.length() > 0) {
+                    streaks.append('、');
+                }
+                streaks.append(r.streak);
             }
             if (!r.err.isEmpty()) {
                 if (err.length() > 0) {
@@ -91,11 +90,11 @@ public final class ActivityModule implements Module {
 
         StringBuilder sb = new StringBuilder();
         sb.append(okCount).append('/').append(arr.length()).append(" 账号，上报 ").append(sentTotal).append(" 条");
-        if (streak > 0) {
-            sb.append("，连登 ").append(streak).append(" 天");
+        if (monthTotal > 0) {
+            sb.append("，本月活跃合计 ").append(monthTotal).append(" 天");
         }
-        if (monthDays > 0) {
-            sb.append("，本月活跃 ").append(monthDays).append(" 天");
+        if (streaks.length() > 0) {
+            sb.append("，连登 ").append(streaks).append(" 天");
         }
         if (err.length() > 0) {
             sb.append("，失败：").append(err);
