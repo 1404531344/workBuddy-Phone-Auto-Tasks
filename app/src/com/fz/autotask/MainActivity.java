@@ -1183,36 +1183,118 @@ public class MainActivity extends Activity {
         }
         list.clear();
         list.addAll(picked);
-        toast("正在签到选中的 " + list.size() + " 个账号…");
+        toast("正在跑选中的 " + list.size() + " 个账号（签到 + 旅行 + 活跃）…");
         new Thread(new Runnable() {
             @Override
             public void run() {
-                final StringBuilder sb = new StringBuilder();
-                int okCount = 0;
+                final StringBuilder detail = new StringBuilder();
+                int signed = 0, traveled = 0, active = 0;
+                long nextTravelAt = 0;
+                final java.util.LinkedHashMap<String, org.json.JSONObject> fresh =
+                        new java.util.LinkedHashMap<>();
                 for (com.fz.autotask.modules.workbuddy.WorkBuddyAccount a : list) {
-                    String res;
+                    String nm = (a.label == null || a.label.isEmpty()) ? a.uid : a.label;
+
+                    // 1) 签到
+                    String signRes;
                     try {
                         if (com.fz.autotask.modules.workbuddy.WorkBuddyClient.needRefresh(a)) {
                             com.fz.autotask.modules.workbuddy.WorkBuddyClient.refresh(a);
                         }
-                        res = com.fz.autotask.modules.workbuddy.WorkBuddyClient.checkin(a);
-                        okCount++;
+                        signRes = com.fz.autotask.modules.workbuddy.WorkBuddyClient.checkin(a);
+                        signed++;
                     } catch (com.fz.autotask.modules.workbuddy.WorkBuddyClient.Unauthorized ue) {
-                        res = "登录过期，请重新添加账号";
+                        signRes = "登录过期，请重新添加账号";
                     } catch (Exception e) {
-                        res = "失败：" + e.getMessage();
+                        signRes = "失败：" + (e.getMessage() == null
+                                ? e.getClass().getSimpleName() : e.getMessage());
                     }
-                    String nm = (a.label == null || a.label.isEmpty()) ? a.uid : a.label;
-                    sb.append(nm).append(" → ").append(res).append("\n");
-                    dbg("signAllNow " + nm + " raw=" + res);
+
+                    // 2) 旅行：到点领奖 / 未派出就出发
+                    com.fz.autotask.modules.workbuddy.TravelModule.R tr =
+                            com.fz.autotask.modules.workbuddy.TravelModule.runOne(a);
+                    String travelRes;
+                    if (!tr.err.isEmpty()) {
+                        travelRes = "失败：" + tr.err;
+                    } else if (tr.claimed > 0) {
+                        travelRes = "领到 +" + tr.claimed + (tr.departed ? "，已再派出" : "");
+                        traveled++;
+                    } else if (tr.departed) {
+                        travelRes = "已派出";
+                        traveled++;
+                    } else if (tr.waiting) {
+                        travelRes = "旅行中（" + com.fz.autotask.modules.workbuddy.WorkBuddyTravel
+                                .fmtArrive(tr.arriveAt) + " 到）";
+                        traveled++;
+                    } else {
+                        travelRes = "今日已派完";
+                        traveled++;
+                    }
+                    if (tr.nextAt > 0 && (nextTravelAt == 0 || tr.nextAt < nextTravelAt)) {
+                        nextTravelAt = tr.nextAt;
+                    }
+
+                    // 3) 活跃：连发上报，点亮活跃地图
+                    com.fz.autotask.modules.workbuddy.ActivityModule.R ar =
+                            com.fz.autotask.modules.workbuddy.ActivityModule.runOne(a, cfg.reportCount());
+                    String actRes;
+                    if (!ar.err.isEmpty()) {
+                        actRes = "失败：" + ar.err;
+                    } else {
+                        actRes = "上报 " + ar.sent + " 条";
+                        if (ar.streak > 0) {
+                            actRes += "，连登 " + ar.streak + " 天";
+                        }
+                        active++;
+                    }
+
+                    detail.append(nm).append(" → 签到 ").append(signRes)
+                            .append(" · 旅行 ").append(travelRes)
+                            .append(" · 活跃 ").append(actRes).append("\n");
+
+                    // 用刷新后的 token 覆盖同 uid 的旧条目，其它账号原样保留
+                    fresh.put(a.uid, a.toJson());
                 }
-                final String brief = "签到完成 " + okCount + "/" + list.size() + " 个账号";
+                // 单次合并：读一遍当前账号，按 uid 覆盖，顺手去掉历史遗留的重复条目
+                org.json.JSONArray cur = cfg.wbAccounts();
+                org.json.JSONArray out = new org.json.JSONArray();
+                java.util.Set<String> seen = new java.util.HashSet<>();
+                for (int i = 0; i < cur.length(); i++) {
+                    org.json.JSONObject o = cur.optJSONObject(i);
+                    if (o == null) {
+                        continue;
+                    }
+                    String uid = str(o, "uid");
+                    if (uid.isEmpty() || !seen.add(uid)) {
+                        continue;
+                    }
+                    out.put(fresh.containsKey(uid) ? fresh.get(uid) : o);
+                }
+                for (java.util.Map.Entry<String, org.json.JSONObject> e : fresh.entrySet()) {
+                    if (!seen.contains(e.getKey())) {
+                        out.put(e.getValue());
+                    }
+                }
+                cfg.saveWbAccounts(out);
+                if (nextTravelAt > 0) {
+                    cfg.setTravelNextAt(nextTravelAt);
+                }
+                dbg("signAllNow\n" + detail);
+
+                final String brief = "完成：签到 " + signed + "/" + list.size()
+                        + " · 旅行 " + traveled + "/" + list.size()
+                        + " · 活跃 " + active + "/" + list.size();
+                final String lines = detail.toString();
                 runOnUiThread(new Runnable() {
                     @Override
                     public void run() {
-                        // 不弹窗，只给一句 toast；明细写进 login_dbg.txt
                         toast(brief);
-                        // 签到后必须强制刷新：loadStats() 默认命中缓存会直接跳过
+                        new android.app.AlertDialog.Builder(MainActivity.this)
+                                .setTitle("本次结果")
+                                .setMessage(lines)
+                                .setPositiveButton("知道了", null)
+                                .show();
+                        // 跑完必须强制刷新：loadStats() 默认命中缓存会直接跳过
                         loadStats(true);
                     }
                 });

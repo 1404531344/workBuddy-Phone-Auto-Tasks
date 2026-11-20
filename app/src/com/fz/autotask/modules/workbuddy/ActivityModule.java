@@ -67,36 +67,22 @@ public final class ActivityModule implements Module {
                 continue;   // 坏条目原样保留在下面
             }
             WorkBuddyAccount a = WorkBuddyAccount.from(o);
-            try {
-                if (WorkBuddyClient.needRefresh(a)) {
-                    WorkBuddyClient.refresh(a);
-                }
-                int sent;
-                try {
-                    sent = report(a, count);
-                } catch (WorkBuddyClient.Unauthorized ue) {
-                    WorkBuddyClient.refresh(a);
-                    sent = report(a, count);
-                }
-                sentTotal += sent;
-                if (sent > 0) {
-                    // 回读：report 200 不等于计分，用连登 + 热力图自证闭环
-                    int s = streakDays(a);
-                    if (s > streak) {
-                        streak = s;
-                    }
-                    int d = monthActiveDays(a);
-                    if (d > monthDays) {
-                        monthDays = d;
-                    }
-                    okCount++;
-                }
-            } catch (Throwable e) {
-                String m = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
+            R r = runOne(a, count);
+            sentTotal += r.sent;
+            if (r.sent > 0) {
+                okCount++;
+            }
+            if (r.streak > streak) {
+                streak = r.streak;
+            }
+            if (r.monthDays > monthDays) {
+                monthDays = r.monthDays;
+            }
+            if (!r.err.isEmpty()) {
                 if (err.length() > 0) {
                     err.append("；");
                 }
-                err.append(a.display()).append(' ').append(m);
+                err.append(a.display()).append(' ').append(r.err);
             }
             updated.put(a.toJson());
         }
@@ -115,6 +101,43 @@ public final class ActivityModule implements Module {
             sb.append("，失败：").append(err);
         }
         return sb.toString();
+    }
+
+    /** 单账号跑一次活跃上报的结果。 */
+    public static final class R {
+        public int sent;        // 成功上报的条数
+        public int streak;      // 连续活跃天数
+        public int monthDays;   // 本月活跃天数
+        public String err = "";
+    }
+
+    /**
+     * 跑一个账号：连发 count 条上报，再回读连登 / 本月活跃天数自证。
+     * 「一键签到」（账号页）也用它。
+     */
+    public static R runOne(WorkBuddyAccount a, int count) {
+        R r = new R();
+        try {
+            if (WorkBuddyClient.needRefresh(a)) {
+                WorkBuddyClient.refresh(a);
+            }
+            int sent;
+            try {
+                sent = report(a, count);
+            } catch (WorkBuddyClient.Unauthorized ue) {
+                WorkBuddyClient.refresh(a);
+                sent = report(a, count);
+            }
+            r.sent = sent;
+            if (sent > 0) {
+                // 回读：report 200 不等于计分，用连登 + 热力图自证闭环
+                r.streak = streakDays(a);
+                r.monthDays = monthActiveDays(a);
+            }
+        } catch (Throwable e) {
+            r.err = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
+        }
+        return r;
     }
 
     /** 连发 count 条上报，返回成功条数。401/403 抛 Unauthorized 让上层刷新 token 后重试。 */

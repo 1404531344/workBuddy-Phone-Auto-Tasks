@@ -258,11 +258,42 @@ public final class Config {
         }
         sp.edit().putString("modules_hidden", a.toString()).apply();
     }
+    /** 落库：顺手按 uid 去重（同一个 uid 只留最后一条），避免历史 bug 留下的重复账号。 */
     public void saveWbAccounts(JSONArray arr) {
+        JSONArray clean = dedupeByUid(arr);
         sp.edit()
-                .putString(K_WB_ACCOUNTS, arr.toString())
-                .putString(K_WB_BACKUP, arr.toString())
+                .putString(K_WB_ACCOUNTS, clean.toString())
+                .putString(K_WB_BACKUP, clean.toString())
                 .apply();
+    }
+
+    private static JSONArray dedupeByUid(JSONArray arr) {
+        if (arr == null) {
+            return new JSONArray();
+        }
+        java.util.LinkedHashMap<String, JSONObject> byUid = new java.util.LinkedHashMap<>();
+        JSONArray noUid = new JSONArray();
+        for (int i = 0; i < arr.length(); i++) {
+            JSONObject o = arr.optJSONObject(i);
+            if (o == null) {
+                continue;
+            }
+            String uid = o.optString("uid", "");
+            if (uid.isEmpty() || "null".equals(uid)) {
+                noUid.put(o);
+            } else {
+                byUid.remove(uid);       // 靠后的覆盖靠前的
+                byUid.put(uid, o);
+            }
+        }
+        JSONArray out = new JSONArray();
+        for (JSONObject o : byUid.values()) {
+            out.put(o);
+        }
+        for (int i = 0; i < noUid.length(); i++) {
+            out.put(noUid.optJSONObject(i));
+        }
+        return out;
     }
     public String importStamp() {
         return sp.getString(K_IMPORT_STAMP, "");
