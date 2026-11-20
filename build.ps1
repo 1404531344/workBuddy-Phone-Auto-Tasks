@@ -1,4 +1,4 @@
-# AutoTask APK build script (no Gradle, no Android Studio needed)
+﻿# AutoTask APK build script (no Gradle, no Android Studio needed)
 # Requires: JDK 17, Android SDK build-tools 34.0.0, platforms/android-34/android.jar
 #
 # Usage:
@@ -78,7 +78,14 @@ L 'javac ok'
 # ---- 4. d8 ------------------------------------------------------------------
 $classes = Get-ChildItem "$Build\classes" -Recurse -Filter *.class | ForEach-Object { $_.FullName }
 L ("classes: " + $classes.Count)
-& cmd /c "`"$BT\d8.bat`" --release --lib `"$Jar`" --min-api 24 --output `"$Build\dex`" $($classes -join ' ')  2>&1" | ForEach-Object { L $_ }
+# 类一多，命令行就超 cmd 的 8191 上限，d8 会静默失败（只留一句「命令语法不正确」）。
+# 改成写 @argfile 再直接调 java，绕过 cmd 的长度限制。
+$d8args = "$Build\d8.args"
+$lines8 = @('--release','--lib',$Jar,'--min-api','24','--output',"$Build\dex") + $classes
+[IO.File]::WriteAllLines($d8args, [string[]]$lines8, [Text.Encoding]::ASCII)
+New-Item -ItemType Directory -Force -Path "$Build\dex" | Out-Null
+$javaExe = Join-Path $env:JAVA_HOME 'bin\java.exe'
+& $javaExe -cp "$BT\lib\d8.jar" com.android.tools.r8.D8 "@$d8args" 2>&1 | ForEach-Object { L $_ }
 if (-not (Test-Path "$Build\dex\classes.dex")) { Die "d8 produced no classes.dex" }
 L ('d8 ok  classes.dex ' + (Get-Item "$Build\dex\classes.dex").Length + ' B')
 

@@ -1138,6 +1138,13 @@ public class MainActivity extends Activity {
                 showTravelInfo(uid, label);
             }
         });
+        travelPill.setOnLongClickListener(new View.OnLongClickListener() {
+            @Override
+            public boolean onLongClick(View v) {
+                showTravelInfo(uid, label);
+                return true;
+            }
+        });
         chips.addView(travelPill);
 
         // 活跃火焰：紧贴飞机右边。灰色 → 越活跃越红，从底部往上填；长按看明细。
@@ -1371,6 +1378,117 @@ public class MainActivity extends Activity {
                     }
                 });
         fetchTravelInto(body, uid, a);
+    }
+
+    /** 首页 🛫：所有账号的旅行状态汇总（点 / 长按都走这里，不再冒泡成「跑一遍」）。 */
+    private void showTravelTotal() {
+        final TextView body = new TextView(this);
+        body.setTextSize(13);
+        body.setPadding(dp(18), dp(14), dp(18), dp(4));
+        body.setText(travelSummary());
+        final android.app.AlertDialog dlg = new android.app.AlertDialog.Builder(this)
+                .setTitle("🛫 旅行（全部账号）")
+                .setView(body)
+                .setPositiveButton("关闭", null)
+                .setNegativeButton("刷新", null)
+                .create();
+        dlg.show();
+        dlg.getButton(android.app.AlertDialog.BUTTON_NEGATIVE).setOnClickListener(
+                new View.OnClickListener() {
+                    @Override
+                    public void onClick(View v) {
+                        body.setText("查询中…");
+                        refreshTravelTotal(body);
+                    }
+                });
+    }
+
+    /** 用缓存拼一份旅行汇总。 */
+    private String travelSummary() {
+        org.json.JSONArray arr = cfg.wbAccounts();
+        if (arr.length() == 0) {
+            return "还没有账号";
+        }
+        StringBuilder b = new StringBuilder();
+        for (int i = 0; i < arr.length(); i++) {
+            org.json.JSONObject o = arr.optJSONObject(i);
+            if (o == null) {
+                continue;
+            }
+            String lb = str(o, "label");
+            String[] tv = travelCache.get(str(o, "uid"));
+            b.append("· ").append(lb.isEmpty() ? "账号 " + (i + 1) : lb).append("：");
+            if (tv == null) {
+                b.append("查询中 / 未读\n");
+            } else if ("traveling".equals(tv[0])) {
+                b.append("旅行中\n");
+            } else if ("arrived".equals(tv[0])) {
+                b.append("已到达，待领奖\n");
+            } else if ("error".equals(tv[0])) {
+                b.append("读取失败\n");
+            } else {
+                b.append("未派出\n");
+            }
+        }
+        b.append("\n到点会自动回访：领奖并接着派下一趟。");
+        return b.toString();
+    }
+
+    /** 实时拉一遍每个账号的旅行状态（弹窗里的「刷新」）。 */
+    private void refreshTravelTotal(final TextView body) {
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                StringBuilder b = new StringBuilder();
+                org.json.JSONArray arr = cfg.wbAccounts();
+                for (int i = 0; i < arr.length(); i++) {
+                    org.json.JSONObject o = arr.optJSONObject(i);
+                    if (o == null) {
+                        continue;
+                    }
+                    com.fz.autotask.modules.workbuddy.WorkBuddyAccount a =
+                            com.fz.autotask.modules.workbuddy.WorkBuddyAccount.from(o);
+                    String lb = a.label == null || a.label.isEmpty() ? "账号 " + (i + 1) : a.label;
+                    b.append("· ").append(lb).append("：");
+                    try {
+                        com.fz.autotask.modules.workbuddy.WorkBuddyTravel.State s =
+                                com.fz.autotask.modules.workbuddy.WorkBuddyTravel.status(a);
+                        String label;
+                        if (com.fz.autotask.modules.workbuddy.WorkBuddyTravel.ARRIVED.equals(s.state)) {
+                            label = "已到达，待领奖";
+                        } else if (com.fz.autotask.modules.workbuddy.WorkBuddyTravel.TRAVELING.equals(s.state)) {
+                            b.append("旅行中");
+                            if (!s.locationName.isEmpty()) {
+                                b.append(" · ").append(s.locationName);
+                            }
+                            if (s.arriveAt > 0) {
+                                b.append(" · ").append(com.fz.autotask.modules.workbuddy.WorkBuddyTravel
+                                        .fmtArrive(s.arriveAt)).append(" 到");
+                            }
+                            b.append("\n");
+                            travelCache.put(a.uid, new String[]{s.state, "旅行中"});
+                            continue;
+                        } else {
+                            label = s.dailyLimitReached ? "今日已派完" : "未派出";
+                        }
+                        b.append(label).append("\n");
+                        travelCache.put(a.uid, new String[]{s.state, label});
+                    } catch (Exception e) {
+                        b.append("读取失败：").append(e.getMessage() == null
+                                ? e.getClass().getSimpleName() : e.getMessage()).append("\n");
+                        travelCache.put(a.uid, new String[]{"error", "未知"});
+                    }
+                }
+                b.append("\n到点会自动回访：领奖并接着派下一趟。");
+                final String out = b.toString();
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        body.setText(out);
+                    }
+                });
+            }
+        }).start();
     }
 
     /** 首页火焰：所有账号合计的活跃明细。 */
@@ -1611,9 +1729,24 @@ public class MainActivity extends Activity {
             chips.addView(gap);
 
             boolean travelOn = traveling > 0;
-            chips.addView(pill(travelOn ? ("🛫 旅行 " + traveling + " 只") : "🛫 未出行",
+            TextView mTravel = pill(travelOn ? ("🛫 旅行 " + traveling + " 只") : "🛫 未出行",
                     travelOn ? 0xFF1E9E58 : 0xFF8A8F98,
-                    travelOn ? 0xFFE8F6EE : 0xFFF2F3F5));
+                    travelOn ? 0xFFE8F6EE : 0xFFF2F3F5);
+            // 点/长按看旅行明细；必须吃掉长按，否则会冒泡到卡片的「长按=跑一遍」
+            mTravel.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    showTravelTotal();
+                }
+            });
+            mTravel.setOnLongClickListener(new View.OnLongClickListener() {
+                @Override
+                public boolean onLongClick(View v) {
+                    showTravelTotal();
+                    return true;
+                }
+            });
+            chips.addView(mTravel);
 
             // 活跃度火焰（按所有账号合计）：2 个号 = 60 天满
             final FlameView mf = new FlameView(this);
@@ -2509,10 +2642,12 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void section(LinearLayout root, String text) {        TextView t = new TextView(this);
+    private void section(LinearLayout root, String text) {
+        TextView t = new TextView(this);
         t.setText(text);
         t.setTextSize(16);
-        t.setPadding(0, dp(16), 0, dp(8));
+        // 搜索栏下面收紧一点：原来是 16，看着空一大块
+        t.setPadding(0, dp(4), 0, dp(6));
         root.addView(t);
     }
 
