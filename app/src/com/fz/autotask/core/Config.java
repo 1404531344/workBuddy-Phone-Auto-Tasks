@@ -20,6 +20,10 @@ public final class Config {
     public static final String K_PENDING = "pending_state";
     public static final String K_IMPORT_STAMP = "import_stamp"; // import.json 的长度:修改时间
     public static final String K_TRAVEL_NEXT = "travel_next"; // 下一次旅行到点的 epoch 秒
+    public static final String K_NEXT_RUN = "next_run_at";
+    public static final String K_REPORT_COUNT = "activity_report_count"; // 每次活跃上报的条数
+    public static final String K_TIMES_MIGRATED = "times_migrated"; // 单时段 → 多时段的一次性迁移标记
+
     public static final String K_AUTO = "auto_on";           // 是否开启「每天自动运行」，默认关
     public static final String K_SELFTEST_AT = "selftest_at";     // 自检闹钟计划时间
     public static final String K_SELFTEST_FIRED = "selftest_fired"; // 自检实际触发时间
@@ -64,11 +68,62 @@ public final class Config {
     }
 
     public String time() {
-        return sp.getString(K_TIME, "04:00");
+        java.util.List<String> list = times();
+        return list.isEmpty() ? "04:00" : list.get(0);
+    }
+
+    /**
+     * 每天的运行时刻表，可多个（对齐 BuddySwitch 的 09:00 / 21:00 双时段）。
+     * 存量数据是单个 "04:00"，一样能读。
+     */
+    public java.util.List<String> times() {
+        java.util.ArrayList<String> out = new java.util.ArrayList<>();
+        String raw = sp.getString(K_TIME, "04:00");
+        if (raw != null) {
+            for (String p : raw.split("[,，;；\\s]+")) {
+                String v = p.trim();
+                if (!v.isEmpty() && !out.contains(v)) {
+                    out.add(v);
+                }
+            }
+        }
+        if (out.isEmpty()) {
+            out.add("04:00");
+        }
+        return out;
+    }
+
+    public void setTimes(java.util.List<String> list) {
+        java.util.ArrayList<String> clean = new java.util.ArrayList<>();
+        for (String s : list) {
+            String v = s == null ? "" : s.trim();
+            if (!v.isEmpty() && !clean.contains(v)) {
+                clean.add(v);
+            }
+        }
+        sp.edit().putString(K_TIME, android.text.TextUtils.join(",", clean)).apply();
     }
 
     public void setTime(String t) {
         sp.edit().putString(K_TIME, t).apply();
+    }
+
+    /** 每次活跃上报连发几条（BuddySwitch 的 activity_report_count，默认 5）。 */
+    public int reportCount() {
+        int n = sp.getInt(K_REPORT_COUNT, 5);
+        return n < 1 ? 1 : Math.min(n, 20);
+    }
+
+    public void setReportCount(int n) {
+        sp.edit().putInt(K_REPORT_COUNT, n).apply();
+    }
+
+    public boolean timesMigrated() {
+        return sp.getBoolean(K_TIMES_MIGRATED, false);
+    }
+
+    public void setTimesMigrated(boolean v) {
+        sp.edit().putBoolean(K_TIMES_MIGRATED, v).apply();
     }
 
     public boolean isEnabled(String moduleId) {
@@ -234,5 +289,13 @@ public final class Config {
             }
         }
         return -1;
+    }
+    /** 下一次计划运行的时间（ms）。用来判断"到点了却没跑"，即被系统拦了。 */
+    public long nextRunAt() {
+        return sp.getLong(K_NEXT_RUN, 0L);
+    }
+
+    public void setNextRunAt(long ms) {
+        sp.edit().putLong(K_NEXT_RUN, ms).apply();
     }
 }

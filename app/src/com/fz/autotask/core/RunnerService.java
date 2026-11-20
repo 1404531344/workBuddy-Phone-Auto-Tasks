@@ -68,4 +68,26 @@ public class RunnerService extends Service {
     public IBinder onBind(Intent intent) {
         return null;
     }
+
+    /**
+     * Android 14 起 foregroundServiceType="shortService" 有约 3 分钟的硬上限。
+     * 超时系统会回调这里，默认实现直接抛异常把进程干掉；这里改成收尾停服务，
+     * 已经跑完的模块结果照常落盘（Runner 是逐模块记录的）。
+     */
+    @Override
+    public void onTimeout(int startId) {
+        android.util.Log.w("AutoTask", "shortService 到 3 分钟上限，主动收尾");
+        try {
+            if (wake != null && wake.isHeld()) {
+                wake.release();
+            }
+        } catch (Exception ignored) {
+        }
+        Notifier.clearRunning(this);
+        try {
+            stopForeground(STOP_FOREGROUND_REMOVE);
+        } catch (Exception ignored) {
+        }
+        stopSelf(startId);
+    }
 }

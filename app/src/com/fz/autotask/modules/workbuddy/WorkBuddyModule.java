@@ -21,7 +21,7 @@ public final class WorkBuddyModule implements Module {
 
     @Override
     public String description() {
-        return "签到 + 旅行，多账号，token 过期自动刷新";
+        return "签到 + 旅行 + 活跃，多账号，token 过期自动刷新";
     }
 
     @Override
@@ -108,6 +108,16 @@ public final class WorkBuddyModule implements Module {
             }
         } catch (Throwable e) {
             sb.append("；旅行失败：").append(e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage());
+        }
+
+        // 活跃上报同样是子任务（点亮活跃地图），跟签到/旅行合成一行
+        try {
+            String ac = new ActivityModule().run(cfg);
+            if (ac != null && ac.length() > 0) {
+                sb.append("；活跃：").append(ac);
+            }
+        } catch (Throwable e) {
+            sb.append("；活跃失败：").append(e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage());
         }
         return sb.toString();
     }

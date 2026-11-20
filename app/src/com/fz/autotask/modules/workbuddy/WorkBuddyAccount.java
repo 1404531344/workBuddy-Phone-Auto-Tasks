@@ -56,7 +56,8 @@ public final class WorkBuddyAccount {
 
     public String display() {
         String n = label == null || label.isEmpty() ? uid : label;
-        if (n.length() > 4) {
+        // 只在真的长（uid / 邮箱）时才截断；"海关法学" 这种 5 个字的名字不该被砍成 "海关法学…关法学"
+        if (n.length() > 10) {
             n = n.substring(0, 4) + "…" + n.substring(n.length() - 4);
         }
         return n;

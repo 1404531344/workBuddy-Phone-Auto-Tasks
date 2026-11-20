@@ -14,7 +14,7 @@ import com.fz.autotask.MainActivity;
 public final class Notifier {
 
     public static final String CH_RUN = "run";
-    public static final String CH_DONE = "done";
+    public static final String CH_DONE = "done2";
     public static final int ID_RUN = 1001;
     public static final int ID_DONE = 1002;
 
@@ -35,8 +35,17 @@ public final class Notifier {
         run.enableVibration(false);
         nm.createNotificationChannel(run);
 
-        NotificationChannel done = new NotificationChannel(CH_DONE, "任务结果", NotificationManager.IMPORTANCE_DEFAULT);
+        // 旧通道（DEFAULT，不会弹横幅）删掉，换成高优先级：系统才给横幅 + 声音 + 震动
+        try {
+            nm.deleteNotificationChannel("done");
+        } catch (Exception ignored) {
+        }
+        NotificationChannel done = new NotificationChannel(CH_DONE, "任务结果（提醒）", NotificationManager.IMPORTANCE_HIGH);
         done.setShowBadge(true);
+        done.setDescription("每天自动任务跑完后弹一条汇总");
+        done.enableVibration(true);
+        done.setVibrationPattern(new long[]{0, 250, 150, 250});
+        done.setLockscreenVisibility(Notification.VISIBILITY_PUBLIC);
         nm.createNotificationChannel(done);
     }
 
@@ -48,7 +57,8 @@ public final class Notifier {
         } else {
             b = new Notification.Builder(ctx);
         }
-        return b.setSmallIcon(android.R.drawable.stat_notify_sync);
+        return b.setSmallIcon(android.R.drawable.stat_notify_sync)
+                .setPriority(Notification.PRIORITY_HIGH);
     }
 
     /** 运行中的常驻通知（IMPORTANCE_MIN，不响不弹）。 */
@@ -78,6 +88,11 @@ public final class Notifier {
                 .setContentTitle(title)
                 .setContentText(lines.length > 0 ? lines[0] : "")
                 .setAutoCancel(true)
+                .setCategory(Notification.CATEGORY_REMINDER)
+                .setWhen(System.currentTimeMillis())
+                .setShowWhen(true)
+                // 同一 id 重复 post 时只更新不重复响铃：手动连点、补跑、看门狗重排都不会连环炸
+                .setOnlyAlertOnce(true)
                 .setContentIntent(pi);
 
         if (lines.length > 1) {

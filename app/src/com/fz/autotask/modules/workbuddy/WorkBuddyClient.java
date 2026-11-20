@@ -79,6 +79,16 @@ public final class WorkBuddyClient {
         return h;
     }
 
+    /** 增长中心（活跃地图 / 连登 / 热力图）用的头：与旅行同域、同来源页。 */
+    static Map<String, String> growthHeaders(WorkBuddyAccount a) {
+        return travelHeaders(a);
+    }
+
+    /** 活跃上报（/v2/report）只需要基础鉴权头，与桌面端 billing_post 一致。 */
+    static Map<String, String> authHeaders(WorkBuddyAccount a) {
+        return auth(a);
+    }
+
     // ---------- 1. 签到状态 ----------
 
     public static CheckinState status(WorkBuddyAccount a) throws Exception {

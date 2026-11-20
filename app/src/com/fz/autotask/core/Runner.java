@@ -37,8 +37,8 @@ public final class Runner {
             if (sel != null && !sel.contains(m.id())) {
                 continue;
             }
-            // 旅行是 WorkBuddy 模块的子任务，已在模块内部跑，不当独立模块再跑一遍
-            if ("workbuddy-travel".equals(m.id())) {
+            // 旅行 / 活跃都是 WorkBuddy 模块的子任务，已在模块内部跑，不当独立模块再跑一遍
+            if ("workbuddy-travel".equals(m.id()) || "workbuddy-activity".equals(m.id())) {
                 continue;
             }
             long t0 = System.currentTimeMillis();
@@ -68,12 +68,13 @@ public final class Runner {
             sb.append('\n').append(s);
         }
         cfg.setLast(sb.toString());
+        RunLog.append(ctx, head, lines);
 
         Notifier.summary(ctx, "自动任务完成", lines.toArray(new String[0]));
 
         // 自动任务开着才排下一次；关闭状态啥都不排
         if (cfg.autoOn()) {
-            AlarmScheduler.schedule(ctx, cfg.time());
+            AlarmScheduler.scheduleNext(ctx, cfg.times());
         } else {
             AlarmScheduler.cancel(ctx);
         }

@@ -12,6 +12,7 @@ public final class ModuleRegistry {
         // ↓↓↓ 接入新模块 = 在这里加一行 ↓↓↓
         MODULES.add(new com.fz.autotask.modules.workbuddy.WorkBuddyModule());
         MODULES.add(new com.fz.autotask.modules.workbuddy.TravelModule());
+        MODULES.add(new com.fz.autotask.modules.workbuddy.ActivityModule());
         MODULES.add(new com.fz.autotask.modules.demo.DemoModule());
         // ↑↑↑ 接入新模块 = 在这里加一行 ↑↑↑
     }

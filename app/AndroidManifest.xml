@@ -52,5 +52,11 @@
             android:name=".core.RunnerService"
             android:exported="false"
             android:foregroundServiceType="shortService" />
+
+        <!-- 闹钟看门狗：JobScheduler 周期任务，ROM 抹掉闹钟后能自己补回来 -->
+        <service
+            android:name=".core.WatchdogJob"
+            android:exported="true"
+            android:permission="android.permission.BIND_JOB_SERVICE" />
     </application>
 </manifest>

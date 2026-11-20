@@ -53,25 +53,102 @@ public class MainActivity extends Activity {
     private final java.util.Map<String, String[]> statCache = new java.util.HashMap<>();
     /** uid -> {state, 展示文案}（旅行任务） */
     private final java.util.Map<String, String[]> travelCache = new java.util.HashMap<>();
+    /** uid -> {今日活跃分, 本月活跃天数}（火焰图标用） */
+    private final java.util.Map<String, int[]> actCache = new java.util.HashMap<>();
     private boolean refreshingHome = false;
     private EditText homeSearch;
     private Button homeSelAll;
     private final java.util.Set<String> modSelected = new java.util.HashSet<>();
     private LinearLayout accountsBox;
+    /** 调试入口（runmod / runall）在一次进程里只执行一次。 */
+    private static boolean debugHookConsumed = false;
 
     @Override
     protected void onCreate(Bundle b) {
         super.onCreate(b);
         cfg = new Config(this);
+        // 调试入口（排障用，不影响正常使用）：
+        //   adb shell am start -n com.fz.autotask/.MainActivity --es settime 0410   → 加一个时段并重排
+        //   adb shell am start -n com.fz.autotask/.MainActivity --es runmod workbuddy-activity → 只跑这个模块
+        try {
+            String st = getIntent() == null ? null : getIntent().getStringExtra("settime");
+            if (st != null && AlarmScheduler.parse(st) != null) {
+                java.util.List<String> list = cfg.times();
+                int[] t = AlarmScheduler.parse(st);
+                String norm = String.format("%02d:%02d", t[0], t[1]);
+                if (!list.contains(norm)) {
+                    list.add(norm);
+                    java.util.Collections.sort(list);
+                    cfg.setTimes(list);
+                }
+                cfg.setAutoOn(true);
+                AlarmScheduler.schedule(this, cfg.times());
+            }
+        } catch (Throwable ignored) {
+        }
+        try {
+            final String only = getIntent() == null ? null : getIntent().getStringExtra("runmod");
+            final boolean runAll = getIntent() != null && getIntent().hasExtra("runall");
+            // 一次性：抽掉 extra，避免 Activity 被重建（旋转 / 从最近任务恢复）时又跑一遍
+            if (getIntent() != null) {
+                getIntent().removeExtra("runmod");
+                getIntent().removeExtra("runall");
+            }
+            if (!debugHookConsumed && (runAll || (only != null && only.length() > 0))) {
+                debugHookConsumed = true;
+                new Thread(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (runAll) {
+                            com.fz.autotask.core.Runner.runAll(MainActivity.this);
+                        } else {
+                            com.fz.autotask.core.Runner.runModules(MainActivity.this,
+                                    java.util.Collections.singletonList(only));
+                        }
+                    }
+                }, "autotask-debug-run").start();
+            }
+        } catch (Throwable ignored) {
+        }
         ensurePermissions();
         autoImportIfChanged();
-        if (cfg.autoOn() && AlarmScheduler.parse(cfg.time()) != null) {
-            AlarmScheduler.schedule(this, cfg.time());
+        migrateTimesOnce();
+        // 看门狗（JobScheduler 周期任务）：闹钟被 ROM 抹掉后能自己补回来
+        com.fz.autotask.core.WatchdogJob.ensure(this);
+        if (cfg.autoOn() && !AlarmScheduler.timesValid(cfg.times())) {
+            AlarmScheduler.cancel(this);
+            AlarmScheduler.cancelTravel(this);
+        } else if (cfg.autoOn()) {
+            AlarmScheduler.schedule(this, cfg.times());
         } else {
             AlarmScheduler.cancel(this);
             AlarmScheduler.cancelTravel(this);
         }
         showHome();
+    }
+
+    /**
+     * 一次性把老的单个时间扩成「对齐 BuddySwitch」的三个时段：
+     * 保留用户原来的点，再补上桌面端签到 / 旅行用的 09:00 与 21:00。
+     * 只跑一次；之后用户在界面上改成什么就是什么。
+     */
+    private void migrateTimesOnce() {
+        if (cfg.timesMigrated()) {
+            return;
+        }
+        cfg.setTimesMigrated(true);
+        java.util.List<String> cur = cfg.times();
+        if (cur.size() != 1) {
+            return;   // 已经是多时段，说明配过了
+        }
+        java.util.List<String> next = new java.util.ArrayList<>(cur);
+        for (String s : new String[]{"09:00", "21:00"}) {
+            if (!next.contains(s)) {
+                next.add(s);
+            }
+        }
+        java.util.Collections.sort(next);
+        cfg.setTimes(next);
     }
 
     /** 首页：标题 + 时间 + 一键签到 + 模块卡片（对应手绘稿）。 */
@@ -101,7 +178,7 @@ public class MainActivity extends Activity {
         head.addView(gap2, new LinearLayout.LayoutParams(0, 1, 1f));
 
         TextView timeTop = new TextView(this);
-        timeTop.setText("时间 " + cfg.time());
+        timeTop.setText("时间 " + AlarmScheduler.display(cfg.times()));
         timeTop.setTextSize(14);
         timeTop.setPadding(dp(8), dp(6), 0, dp(6));
         timeTop.setOnClickListener(new View.OnClickListener() {
@@ -117,11 +194,66 @@ public class MainActivity extends Activity {
 
         TextView sub = new TextView(this);
         sub.setText(cfg.autoOn()
-                ? ("每天 " + cfg.time() + " 自动跑一遍，结束后只发一条通知")
+                ? ("每天 " + AlarmScheduler.display(cfg.times()) + " 各跑一遍，结束后只发一条通知")
                 : "已关闭自动运行：点右上角齿轮开启，也可以自己点「一键签到」");
         sub.setTextSize(11);
-        sub.setPadding(0, dp(4), 0, dp(14));
+        sub.setPadding(0, dp(4), 0, dp(2));
         root.addView(sub);
+
+        // 上次运行：通知可能被系统折叠/静音，这里给一条本地可数的记录
+        TextView lastRun = new TextView(this);
+        String lr = com.fz.autotask.core.RunLog.last(this);
+        if (lr == null) {
+            lastRun.setText("还没运行过");
+        } else {
+            int bar = lr.indexOf(" | ");
+            String headPart = bar > 0 ? lr.substring(0, bar) : lr;
+            int cut = headPart.indexOf("  ");
+            if (cut > 0) {
+                headPart = headPart.substring(cut + 2);
+            }
+            String first = bar > 0 ? lr.substring(bar + 3) : "";
+            lastRun.setText("上次运行 " + headPart + (first.length() > 0 ? "  ·  " + first : ""));
+        }
+        lastRun.setTextColor(0xFF7A818C);
+        lastRun.setTextSize(11);
+        lastRun.setPadding(0, dp(2), 0, dp(14));
+        root.addView(lastRun);
+
+        // 漏跑检测：计划时间过了 10 分钟还没跑过 —— 基本就是被系统拦了
+        long nextAt = cfg.nextRunAt();
+        long lastAt = com.fz.autotask.core.RunLog.lastRunAt(this);
+        if (nextAt > 0 && System.currentTimeMillis() > nextAt + 10 * 60 * 1000L && lastAt < nextAt) {
+            TextView warn = new TextView(this);
+            warn.setText("⚠ 定时任务被系统拦了："
+                    + com.fz.autotask.core.AlarmScheduler.fmt(nextAt)
+                    + " 那次没跑成。点这里开「自启动 / 允许后台运行」"
+                    + "（设置 → 电池 → 应用耗电管理 → 自动任务）");
+            warn.setTextColor(0xFFB42318);
+            warn.setTextSize(12);
+            warn.setPadding(dp(10), dp(8), dp(10), dp(8));
+            android.graphics.drawable.GradientDrawable bgw = new android.graphics.drawable.GradientDrawable();
+            bgw.setColor(0xFFFFF1F0);
+            bgw.setCornerRadius(dp(8));
+            warn.setBackground(bgw);
+            warn.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    // 先自己救一次：重排闹钟（顺便刷新 nextRunAt），再去设置页开权限
+                    long w = AlarmScheduler.schedule(MainActivity.this, cfg.times());
+                    toast(w > 0 ? ("已重新排上，下次 " + AlarmScheduler.fmt(w))
+                            : "重排失败，去设置里允许「自启动 / 后台运行」");
+                    try {
+                        android.content.Intent ai = new android.content.Intent(
+                                android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
+                        ai.setData(android.net.Uri.parse("package:" + getPackageName()));
+                        startActivity(ai);
+                    } catch (Exception ignored) {
+                    }
+                }
+            });
+            root.addView(warn);
+        }
 
         // 首页两个入口：添加模块 / 一键签到（暂不绑定功能）
         LinearLayout homeActions = new LinearLayout(this);
@@ -319,7 +451,7 @@ public class MainActivity extends Activity {
             root.addView(empty);
         }
         for (final Module m : ModuleRegistry.all()) {
-            if ("demo".equals(m.id()) || "workbuddy-travel".equals(m.id()) || hidden.contains(m.id())) {
+            if ("demo".equals(m.id()) || isSubModule(m.id()) || hidden.contains(m.id())) {
                 continue;
             }
             if (!q.isEmpty() && !m.name().contains(q) && !m.description().contains(q)) {
@@ -372,36 +504,53 @@ public class MainActivity extends Activity {
     }
 
     /** 改时间（首页右上角「时间」）。 */
+    /** 改运行时刻：支持多个，用逗号隔开（对齐 BuddySwitch 的 09:00 / 21:00 双时段）。 */
     private void editTime() {
         final EditText input = new EditText(this);
         input.setSingleLine(true);
         input.setInputType(InputType.TYPE_CLASS_DATETIME);
-        input.setText(cfg.time());
-        input.setHint("04:00");
+        input.setText(android.text.TextUtils.join(",", cfg.times()));
+        input.setHint("01:40,09:00,21:00");
         new android.app.AlertDialog.Builder(this)
-                .setTitle("每天几点执行")
+                .setTitle("每天几点执行（可写多个）")
+                .setMessage("多个时间用逗号隔开，例如：\n01:40,09:00,21:00\n到点各跑一遍，跑完只发一条通知。")
                 .setView(input)
                 .setPositiveButton("保存", new android.content.DialogInterface.OnClickListener() {
                     @Override
                     public void onClick(android.content.DialogInterface d, int which) {
-                        int[] t = AlarmScheduler.parse(input.getText().toString());
-                        if (t == null) {
-                            toast("时间格式要写成 04:00");
+                        String raw = input.getText().toString();
+                        java.util.List<String> list = new java.util.ArrayList<>();
+                        for (String p : raw.split("[,，;；\\s]+")) {
+                            if (p.trim().isEmpty()) {
+                                continue;
+                            }
+                            int[] t = AlarmScheduler.parse(p);
+                            if (t == null) {
+                                toast("「" + p.trim() + "」不是合法时间，写成 04:00 这样");
+                                return;
+                            }
+                            String norm = String.format("%02d:%02d", t[0], t[1]);
+                            if (!list.contains(norm)) {
+                                list.add(norm);
+                            }
+                        }
+                        if (list.isEmpty()) {
+                            toast("至少写一个时间");
                             return;
                         }
-                        String norm = String.format("%02d:%02d", t[0], t[1]);
-                        cfg.setTime(norm);
+                        java.util.Collections.sort(list);
+                        cfg.setTimes(list);
+                        String joined = android.text.TextUtils.join(" · ", list);
                         if (!cfg.autoOn()) {
-                cfg.setTime(norm);
-                toast("已保存 " + norm + "（自动任务未开启，不会自动跑）");
-                showHome();
-                return;
-            }
-            long when = AlarmScheduler.schedule(MainActivity.this, norm);
+                            toast("已保存 " + joined + "（自动任务未开启，不会自动跑）");
+                            showHome();
+                            return;
+                        }
+                        long when = AlarmScheduler.schedule(MainActivity.this, list);
                         if (when < 0) {
                             toast("注册失败，请检查「闹钟和提醒」权限");
                         } else {
-                            toast("已注册，下次 " + AlarmScheduler.fmt(when));
+                            toast("已保存 " + joined + "，下次 " + AlarmScheduler.fmt(when));
                         }
                         showHome();
                     }
@@ -956,6 +1105,32 @@ public class MainActivity extends Activity {
         });
         chips.addView(travelPill);
 
+        // 活跃火焰：紧贴飞机右边。灰色 → 越活跃越红，从底部往上填；长按看明细。
+        // 火焰以「一个月」为满：本月活跃天数 ÷ 当月天数，月初开始慢慢往上填
+        int[] act = actCache.get(uid);
+        int daysInMonth = java.util.Calendar.getInstance()
+                .getActualMaximum(java.util.Calendar.DAY_OF_MONTH);
+        float prog = (act == null) ? 0f : Math.min(1f, act[1] / (float) daysInMonth);
+        FlameView flame = new FlameView(this);
+        LinearLayout.LayoutParams flp = new LinearLayout.LayoutParams(dp(20), dp(22));
+        flp.leftMargin = dp(8);
+        flame.setLayoutParams(flp);
+        flame.setProgress(prog);
+        flame.setOnLongClickListener(new View.OnLongClickListener() {
+            @Override
+            public boolean onLongClick(View v) {
+                showActivityInfo(uid, label);
+                return true;
+            }
+        });
+        flame.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                showActivityInfo(uid, label);
+            }
+        });
+        chips.addView(flame);
+
         card.addView(chips);
 
 
@@ -1074,9 +1249,84 @@ public class MainActivity extends Activity {
         fetchTravelInto(body, uid, a);
     }
 
-    private void fetchTravelInto(final TextView body, final String uid,
-                                 final com.fz.autotask.modules.workbuddy.WorkBuddyAccount a) {
+    /** 点 / 长按火焰：查一次活跃明细。 */
+    private void showActivityInfo(final String uid, String label) {
+        final com.fz.autotask.modules.workbuddy.WorkBuddyAccount a = findAccount(uid);
+        if (a == null) {
+            toast("账号已不在列表里");
+            return;
+        }
+        final TextView body = new TextView(this);
+        body.setTextSize(13);
+        body.setPadding(dp(18), dp(14), dp(18), dp(4));
+        body.setText("查询中…");
+        final android.app.AlertDialog dlg = new android.app.AlertDialog.Builder(this)
+                .setTitle("🔥 活跃 · " + ((label == null || label.isEmpty()) ? uid : label))
+                .setView(body)
+                .setPositiveButton("关闭", null)
+                .setNegativeButton("刷新", null)
+                .create();
+        dlg.show();
+        dlg.getButton(android.app.AlertDialog.BUTTON_NEGATIVE).setOnClickListener(
+                new View.OnClickListener() {
+                    @Override
+                    public void onClick(View v) {
+                        body.setText("查询中…");
+                        fetchActivityInto(body, uid, a);
+                    }
+                });
+        fetchActivityInto(body, uid, a);
+    }
+
+    /** 火焰明细的取数与渲染。 */
+    private void fetchActivityInto(final TextView body, final String uid,
+                                   final com.fz.autotask.modules.workbuddy.WorkBuddyAccount a) {
         new Thread(new Runnable() {
+            @Override
+            public void run() {
+                String txt;
+                int todayScore = 0;
+                int monthDays = 0;
+                try {
+                    com.fz.autotask.modules.workbuddy.ActivityModule.Act d =
+                            com.fz.autotask.modules.workbuddy.ActivityModule.detail(a);
+                    todayScore = d.todayScore;
+                    monthDays = d.monthDays;
+                    StringBuilder b = new StringBuilder();
+                    if (!d.ok) {
+                        b.append("⚠ 拿不到活跃数据（网络或登录态问题）\n\n");
+                    }
+                    b.append("今日活跃：").append(d.todayScore).append(" 分");
+                    b.append(d.todayScore <= 0 ? "（今天还没点亮）" : "").append("\n");
+                    b.append("本月活跃：").append(d.monthDays).append(" / ")
+                            .append(java.util.Calendar.getInstance()
+                                    .getActualMaximum(java.util.Calendar.DAY_OF_MONTH)).append(" 天\n");
+                    b.append("连续活跃：").append(d.streak).append(" 天（昨天没活跃就会断）\n");
+                    b.append("补签卡：").append(d.makeupCards).append(" 张\n\n");
+                    b.append("火焰 = 本月活跃天数 ÷ 当月天数，从月中开始慢慢往上填，满一个月全红。\n");
+                    b.append("「今日活跃」由对话上报（/v2/report）打点；\n");
+                    b.append("签到只加积分，不会点亮活跃地图 —— 两件事互不影响。");
+                    txt = b.toString();
+                } catch (Throwable e) {
+                    txt = "查询失败：" + (e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage());
+                }
+                final String out = txt;
+                final int fs = todayScore;
+                final int fm = monthDays;
+                actCache.put(uid, new int[]{fs, fm});
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        body.setText(out);
+                        renderAccounts();
+                    }
+                });
+            }
+        }).start();
+    }
+
+    private void fetchTravelInto(final TextView body, final String uid,
+                                 final com.fz.autotask.modules.workbuddy.WorkBuddyAccount a) {        new Thread(new Runnable() {
             @Override
             public void run() {
                 String txt;
@@ -1105,7 +1355,7 @@ public class MainActivity extends Activity {
                     }
                     b.append("今日已派：").append(s.dailyLimitReached ? "是" : "否").append("\n");
                     b.append(cfg.autoOn()
-                            ? ("\n每次 " + cfg.time() + " 自动跑：已到达会领奖，未派出会挑时长最长的地点出发。")
+                            ? ("\n每次 " + AlarmScheduler.display(cfg.times()) + " 自动跑：已到达会领奖，未派出会挑时长最长的地点出发。")
                             : "\n自动任务已关闭：点「一键签到」时才会领奖/出发。");
                     b.append("\n旅行到点还会自动回访：领奖并立刻再派出。");
                     txt = b.toString();
@@ -1147,52 +1397,57 @@ public class MainActivity extends Activity {
         ds.setPadding(0, dp(4), 0, dp(8));
         card.addView(ds);
 
-        // 状态角标：签到 N/M · 旅行 K 只
         LinearLayout chips = new LinearLayout(this);
         chips.setOrientation(LinearLayout.HORIZONTAL);
-        int total = 0, signed = 0, traveling = 0, loaded = 0;
-        org.json.JSONArray arr = cfg.wbAccounts();
-        for (int i = 0; i < arr.length(); i++) {
-            org.json.JSONObject o = arr.optJSONObject(i);
-            if (o == null) {
-                continue;
-            }
-            total++;
-            String uid = str(o, "uid");
-            String[] st = statCache.get(uid);
-            if (st != null) {
-                loaded++;
-                if ("1".equals(st[2])) {
-                    signed++;
+        if ("workbuddy-activity".equals(m.id())) {
+            // 活跃模块跟签到/旅行无关，别套那两颗角标，免得看着像「已签到」
+            chips.addView(pill("📊 每次上报 " + cfg.reportCount() + " 条", 0xFF8A8F98, 0xFFF2F3F5));
+            card.addView(chips);
+        } else {
+            int total = 0, signed = 0, traveling = 0, loaded = 0;
+            org.json.JSONArray arr = cfg.wbAccounts();
+            for (int i = 0; i < arr.length(); i++) {
+                org.json.JSONObject o = arr.optJSONObject(i);
+                if (o == null) {
+                    continue;
+                }
+                total++;
+                String uid = str(o, "uid");
+                String[] st = statCache.get(uid);
+                if (st != null) {
+                    loaded++;
+                    if ("1".equals(st[2])) {
+                        signed++;
+                    }
+                }
+                String[] tv = travelCache.get(uid);
+                if (tv != null && ("traveling".equals(tv[0]) || "arrived".equals(tv[0]))) {
+                    traveling++;
                 }
             }
-            String[] tv = travelCache.get(uid);
-            if (tv != null && ("traveling".equals(tv[0]) || "arrived".equals(tv[0]))) {
-                traveling++;
+            String signText;
+            if (total == 0) {
+                signText = "还没加账号";
+            } else if (loaded == 0) {
+                signText = "签到 查询中";
+            } else {
+                signText = "✓ 签到 " + signed + "/" + total;
             }
-        }
-        String signText;
-        if (total == 0) {
-            signText = "还没加账号";
-        } else if (loaded == 0) {
-            signText = "签到 查询中";
-        } else {
-            signText = "✓ 签到 " + signed + "/" + total;
-        }
-        boolean signOk = total > 0 && loaded > 0 && signed == total;
-        chips.addView(pill(signText,
-                signOk ? 0xFF1E9E58 : 0xFF8A8F98,
-                signOk ? 0xFFE8F6EE : 0xFFF2F3F5));
+            boolean signOk = total > 0 && loaded > 0 && signed == total;
+            chips.addView(pill(signText,
+                    signOk ? 0xFF1E9E58 : 0xFF8A8F98,
+                    signOk ? 0xFFE8F6EE : 0xFFF2F3F5));
 
-        TextView gap = new TextView(this);
-        gap.setWidth(dp(8));
-        chips.addView(gap);
+            TextView gap = new TextView(this);
+            gap.setWidth(dp(8));
+            chips.addView(gap);
 
-        boolean travelOn = traveling > 0;
-        chips.addView(pill(travelOn ? ("🛫 旅行 " + traveling + " 只") : "🛫 未出行",
-                travelOn ? 0xFF1E9E58 : 0xFF8A8F98,
-                travelOn ? 0xFFE8F6EE : 0xFFF2F3F5));
-        card.addView(chips);
+            boolean travelOn = traveling > 0;
+            chips.addView(pill(travelOn ? ("🛫 旅行 " + traveling + " 只") : "🛫 未出行",
+                    travelOn ? 0xFF1E9E58 : 0xFF8A8F98,
+                    travelOn ? 0xFFE8F6EE : 0xFFF2F3F5));
+            card.addView(chips);
+        }
 
         TextView go = new TextView(this);
         go.setText("进入 ›");
@@ -1238,11 +1493,16 @@ public class MainActivity extends Activity {
 
     /** 添加模块（目前只有 WorkBuddy 一个） */
     /** 首页当前显示的模块 id（排除 demo / 旅行子模块 / 被删除的） */
+    /** 旅行 / 活跃是 WorkBuddy 模块的子任务，不出现在首页模块列表里。 */
+    private static boolean isSubModule(String id) {
+        return "workbuddy-travel".equals(id) || "workbuddy-activity".equals(id);
+    }
+
     private java.util.List<String> visibleModuleIds() {
         java.util.Set<String> hidden = cfg.hiddenModules();
         java.util.ArrayList<String> out = new java.util.ArrayList<>();
         for (Module m : ModuleRegistry.all()) {
-            if ("demo".equals(m.id()) || "workbuddy-travel".equals(m.id())) {
+            if ("demo".equals(m.id()) || isSubModule(m.id())) {
                 continue;
             }
             if (hidden.contains(m.id())) {
@@ -1258,7 +1518,7 @@ public class MainActivity extends Activity {
         final java.util.ArrayList<Module> cands = new java.util.ArrayList<>();
         final java.util.ArrayList<String> names = new java.util.ArrayList<>();
         for (Module m : ModuleRegistry.all()) {
-            if ("demo".equals(m.id()) || "workbuddy-travel".equals(m.id())) {
+            if ("demo".equals(m.id()) || isSubModule(m.id())) {
                 continue;
             }
             if (!hidden.contains(m.id())) {
@@ -1433,6 +1693,14 @@ public class MainActivity extends Activity {
                     } catch (Exception e) {
                         travelCache.put(a.uid, new String[]{"error", "未知"});
                     }
+                    // 火焰：今日活跃分 / 本月活跃天数（一次热力图，读不到就保持灰色）
+                    try {
+                        int[] hm = com.fz.autotask.modules.workbuddy.ActivityModule.todayAndMonth(a);
+                        if (hm != null) {
+                            actCache.put(a.uid, hm);
+                        }
+                    } catch (Exception ignored) {
+                    }
                     try {
                         com.fz.autotask.modules.workbuddy.WorkBuddyClient.CheckinState s =
                                 com.fz.autotask.modules.workbuddy.WorkBuddyClient.status(a);
@@ -1518,7 +1786,7 @@ public class MainActivity extends Activity {
     private void setAuto(boolean on) {
         cfg.setAutoOn(on);
         if (on) {
-            long when = AlarmScheduler.schedule(this, cfg.time());
+            long when = AlarmScheduler.schedule(this, cfg.times());
             toast(when > 0 ? ("已开启，下次 " + AlarmScheduler.fmt(when)) : "已开启（时间无效）");
             // 2 分钟后的后台自检：验证「不开 App 也能跑」
             long st = System.currentTimeMillis() + 120000L;
@@ -1609,7 +1877,7 @@ public class MainActivity extends Activity {
         final boolean on = cfg.autoOn();
         new android.app.AlertDialog.Builder(this)
                 .setTitle("自动任务")
-                .setMessage("开启后每天 " + cfg.time() + " 自动把所有模块跑一遍（每个模块做什么由它自己决定）。\n\n"
+                .setMessage("开启后每天 " + AlarmScheduler.display(cfg.times()) + " 自动把所有模块跑一遍（每个模块做什么由它自己决定）。\n\n"
                         + "当前：" + (on ? "已开启" : "已关闭")
                         + "\n关闭时不会排任何闹钟，只在你自己点「一键签到」时才跑。")
                 .setPositiveButton("开启", new android.content.DialogInterface.OnClickListener() {
@@ -1637,7 +1905,7 @@ public class MainActivity extends Activity {
         boolean on = cfg.autoOn();
 
         sb.append("自动任务：").append(on ? "已开启" : "已关闭").append("　");
-        sb.append("时间：").append(cfg.time());
+        sb.append("时间：").append(AlarmScheduler.display(cfg.times()));
         if (on) {
             sb.append("　").append(exact ? "精确闹钟可用" : "⚠ 精确闹钟被关闭");
         }

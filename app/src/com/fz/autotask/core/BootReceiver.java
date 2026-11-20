@@ -20,7 +20,9 @@ public class BootReceiver extends BroadcastReceiver {
             if (!cfg.autoOn()) {
                 return;
             }
-            AlarmScheduler.schedule(context, cfg.time());
+            AlarmScheduler.scheduleNext(context, cfg.times());
+            // 顺便把看门狗也挂上（重启后 JobScheduler 的持久化任务通常会自己回来，这里保险一次）
+            WatchdogJob.ensure(context);
             long at = cfg.travelNextAt();
             if (at * 1000L > System.currentTimeMillis()) {
                 AlarmScheduler.scheduleTravel(context, at * 1000L + 120000L);

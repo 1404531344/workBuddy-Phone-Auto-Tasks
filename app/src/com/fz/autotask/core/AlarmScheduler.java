@@ -26,6 +26,30 @@ public final class AlarmScheduler {
         return am != null && am.canScheduleExactAlarms();
     }
 
+    /**
+     * 用「系统闹钟」方式排（setAlarmClock）：国产 ROM 的「自启动/严格模式」拦截器
+     * 不会掐闹钟类 alarm，这是不依赖用户去开自启动权限也能按时跑的唯一通道。
+     */
+    private static boolean setClock(Context ctx, long when, PendingIntent pi) {
+        AlarmManager am = (AlarmManager) ctx.getSystemService(Context.ALARM_SERVICE);
+        if (am == null) {
+            return false;
+        }
+        try {
+            Intent show = new Intent(ctx, com.fz.autotask.MainActivity.class);
+            show.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+            int f = PendingIntent.FLAG_UPDATE_CURRENT;
+            if (Build.VERSION.SDK_INT >= 23) {
+                f |= PendingIntent.FLAG_IMMUTABLE;
+            }
+            PendingIntent showPi = PendingIntent.getActivity(ctx, REQ + 100, show, f);
+            am.setAlarmClock(new AlarmManager.AlarmClockInfo(when, showPi), pi);
+            return true;
+        } catch (Throwable e) {
+            return false;
+        }
+    }
+
     public static PendingIntent pending(Context ctx) {
         Intent i = new Intent(ctx, TaskReceiver.class);
         i.setAction(TaskReceiver.ACTION_RUN);
@@ -38,29 +62,38 @@ public final class AlarmScheduler {
 
     /** 注册下一次触发；返回触发时间戳（ms），失败返回 -1。 */
     public static long schedule(Context ctx, String hhmm) {
-        int[] t = parse(hhmm);
-        if (t == null) {
+        return schedule(ctx, java.util.Collections.singletonList(hhmm), true);
+    }
+
+    /** 多时段版本：在 times 里挑最近的一次。 */
+    public static long schedule(Context ctx, java.util.List<String> times) {
+        return schedule(ctx, times, true);
+    }
+
+    /**
+     * 供「刚跑完，排下一次」使用：不吃那个「刚过 2 分钟就 8 秒后补跑」的宽限，
+     * 否则目标时间刚过时会被反复排成 8 秒后，形成连环跑。
+     */
+    public static long scheduleNext(Context ctx, String hhmm) {
+        return schedule(ctx, java.util.Collections.singletonList(hhmm), false);
+    }
+
+    public static long scheduleNext(Context ctx, java.util.List<String> times) {
+        return schedule(ctx, times, false);
+    }
+
+    private static long schedule(Context ctx, java.util.List<String> times, boolean allowGrace) {
+        long when = nextTrigger(times, System.currentTimeMillis(), allowGrace);
+        if (when <= 0) {
             return -1L;
-        }
-        Calendar c = Calendar.getInstance();
-        c.set(Calendar.HOUR_OF_DAY, t[0]);
-        c.set(Calendar.MINUTE, t[1]);
-        c.set(Calendar.SECOND, 0);
-        c.set(Calendar.MILLISECOND, 0);
-        long when = c.getTimeInMillis();
-        long now = System.currentTimeMillis();
-        if (when <= now + 5000L) {
-            if (when + 120000L > now) {
-                // 目标时间刚过不到 2 分钟：立刻补跑一次（8 秒后），不要顺延到明天
-                when = now + 8000L;
-            } else {
-                c.add(Calendar.DAY_OF_YEAR, 1);
-                when = c.getTimeInMillis();
-            }
         }
         AlarmManager am = (AlarmManager) ctx.getSystemService(Context.ALARM_SERVICE);
         if (am == null) {
             return -1L;
+        }
+        new Config(ctx).setNextRunAt(when);
+        if (setClock(ctx, when, pending(ctx))) {
+            return when;
         }
         try {
             if (Build.VERSION.SDK_INT >= 23) {
@@ -76,6 +109,72 @@ public final class AlarmScheduler {
             }
         }
         return when;
+    }
+
+    /**
+     * 从 times 里算出下一次触发时刻（ms），0 = 没有合法时间。
+     *
+     * 规则：先看「刚过不到 2 分钟的时段」要不要补跑（allowGrace，只在用户手动改时间时给），
+     * 再取今天剩下最近的一个；今天都没了就是明天最早的那个。
+     */
+    public static long nextTrigger(java.util.List<String> times, long now, boolean allowGrace) {
+        java.util.List<int[]> parsed = new java.util.ArrayList<>();
+        long earliest = 0;
+        if (times != null) {
+            for (String s : times) {
+                int[] t = parse(s);
+                if (t == null) {
+                    continue;
+                }
+                parsed.add(t);
+                long m = t[0] * 60L + t[1];
+                if (earliest == 0 || m < earliest) {
+                    earliest = m;
+                }
+            }
+        }
+        if (parsed.isEmpty()) {
+            return 0L;
+        }
+        long bestToday = Long.MAX_VALUE;
+        long grace = Long.MAX_VALUE;
+        for (int[] t : parsed) {
+            Calendar c = Calendar.getInstance();
+            c.setTimeInMillis(now);
+            c.set(Calendar.HOUR_OF_DAY, t[0]);
+            c.set(Calendar.MINUTE, t[1]);
+            c.set(Calendar.SECOND, 0);
+            c.set(Calendar.MILLISECOND, 0);
+            long at = c.getTimeInMillis();
+            if (at > now + 5000L) {
+                if (at < bestToday) {
+                    bestToday = at;
+                }
+            } else if (allowGrace && at + 120000L > now) {
+                // 目标时间刚过不到 2 分钟：立刻补跑一次（8 秒后），不要顺延到明天
+                long g = now + 8000L;
+                if (g < grace) {
+                    grace = g;
+                }
+            }
+        }
+        if (grace != Long.MAX_VALUE) {
+            return grace;
+        }
+        if (bestToday != Long.MAX_VALUE) {
+            return bestToday;
+        }
+        // 今天全过了 → 明天最早的那个
+        int hh = (int) (earliest / 60);
+        int mm = (int) (earliest % 60);
+        Calendar c = Calendar.getInstance();
+        c.setTimeInMillis(now);
+        c.set(Calendar.HOUR_OF_DAY, hh);
+        c.set(Calendar.MINUTE, mm);
+        c.set(Calendar.SECOND, 0);
+        c.set(Calendar.MILLISECOND, 0);
+        c.add(Calendar.DAY_OF_YEAR, 1);
+        return c.getTimeInMillis();
     }
 
     public static PendingIntent travelPending(Context ctx) {
@@ -96,6 +195,9 @@ public final class AlarmScheduler {
         AlarmManager am = (AlarmManager) ctx.getSystemService(Context.ALARM_SERVICE);
         if (am == null) {
             return -1L;
+        }
+        if (setClock(ctx, whenMs, travelPending(ctx))) {
+            return whenMs;
         }
         try {
             if (Build.VERSION.SDK_INT >= 23) {
@@ -164,10 +266,31 @@ public final class AlarmScheduler {
         if (am != null) {
             am.cancel(pending(ctx));
         }
+        new Config(ctx).setNextRunAt(0L);
     }
 
-    public static int[] parse(String hhmm) {
-        try {
+    /** times 里至少有一个合法时间才算有效。 */
+    public static boolean timesValid(java.util.List<String> times) {
+        if (times == null || times.isEmpty()) {
+            return false;
+        }
+        for (String s : times) {
+            if (parse(s) == null) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** "01:40 · 09:00 · 21:00"，给界面显示用。 */
+    public static String display(java.util.List<String> times) {
+        if (times == null || times.isEmpty()) {
+            return "";
+        }
+        return android.text.TextUtils.join(" · ", times);
+    }
+
+    public static int[] parse(String hhmm) {        try {
             String s = hhmm == null ? "" : hhmm.trim();
             // 容错：允许 0400 / 400 / 4:0 / 04:00 这几种写法
             if (s.indexOf(':') < 0 && s.indexOf('：') < 0) {
