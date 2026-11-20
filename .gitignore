@@ -1,0 +1,18 @@
+# build output
+build/
+build.log
+*.idsig
+
+# signing key — never commit
+signkey.p12
+*.keystore
+*.jks
+
+# local sdk drop-in (portable mode)
+sdk/
+
+# editor / os noise
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
