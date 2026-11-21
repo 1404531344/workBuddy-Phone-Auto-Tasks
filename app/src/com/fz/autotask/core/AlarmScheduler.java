@@ -14,6 +14,11 @@ public final class AlarmScheduler {
     public static final int REQ = 4711;
     public static final int REQ_TRAVEL = 4712;
     public static final int REQ_SELFTEST = 4713;
+    /** 直接用「前台服务」PendingIntent 当闹钟动作（系统代拉起，不经广播这一跳）。 */
+    public static final int REQ_SVC = 4714;
+    /** 备用唤醒：主通道被 ROM 冻结吞掉时，晚 10 分钟再补一次。 */
+    public static final int REQ_BACKUP = 4715;
+    private static final long BACKUP_DELAY_MS = 10 * 60 * 1000L;
 
     private AlarmScheduler() {
     }
@@ -60,6 +65,68 @@ public final class AlarmScheduler {
         return PendingIntent.getBroadcast(ctx, REQ, i, flags);
     }
 
+    /**
+     * 闹钟动作 = 直接拉起 RunnerService。
+     *
+     * 比「先发广播、再在 Receiver 里 startForegroundService」可靠：
+     * 后台启动前台服务在 Android 12+ 是有条件才放行的，广播那点临时白名单只有 10 秒；
+     * getForegroundService() 让系统自己把服务拉起来，属于闹钟投递的一部分，不受这条限制。
+     */
+    public static PendingIntent svcPending(Context ctx) {
+        Intent i = new Intent(ctx, RunnerService.class);
+        i.setAction(TaskReceiver.ACTION_RUN);
+        int flags = PendingIntent.FLAG_UPDATE_CURRENT;
+        if (Build.VERSION.SDK_INT >= 23) {
+            flags |= PendingIntent.FLAG_IMMUTABLE;
+        }
+        if (Build.VERSION.SDK_INT >= 26) {
+            return PendingIntent.getForegroundService(ctx, REQ_SVC, i, flags);
+        }
+        return PendingIntent.getService(ctx, REQ_SVC, i, flags);
+    }
+
+    /** 备用唤醒用的广播 PendingIntent（和主通道同一时刻以外的时间点）。 */
+    public static PendingIntent backupPending(Context ctx) {
+        Intent i = new Intent(ctx, TaskReceiver.class);
+        i.setAction(TaskReceiver.ACTION_RUN);
+        int flags = PendingIntent.FLAG_UPDATE_CURRENT;
+        if (Build.VERSION.SDK_INT >= 23) {
+            flags |= PendingIntent.FLAG_IMMUTABLE;
+        }
+        return PendingIntent.getBroadcast(ctx, REQ_BACKUP, i, flags);
+    }
+
+    private static boolean setExactSafe(Context ctx, long when, PendingIntent pi) {
+        AlarmManager am = (AlarmManager) ctx.getSystemService(Context.ALARM_SERVICE);
+        if (am == null) {
+            return false;
+        }
+        try {
+            if (Build.VERSION.SDK_INT >= 23) {
+                am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, when, pi);
+            } else {
+                am.setExact(AlarmManager.RTC_WAKEUP, when, pi);
+            }
+            return true;
+        } catch (SecurityException e) {
+            try {
+                am.set(AlarmManager.RTC_WAKEUP, when, pi);
+                return true;
+            } catch (Exception e2) {
+                return false;
+            }
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    public static void cancelBackup(Context ctx) {
+        AlarmManager am = (AlarmManager) ctx.getSystemService(Context.ALARM_SERVICE);
+        if (am != null) {
+            am.cancel(backupPending(ctx));
+        }
+    }
+
     /** 注册下一次触发；返回触发时间戳（ms），失败返回 -1。 */
     public static long schedule(Context ctx, String hhmm) {
         return schedule(ctx, java.util.Collections.singletonList(hhmm), true);
@@ -92,23 +159,15 @@ public final class AlarmScheduler {
             return -1L;
         }
         new Config(ctx).setNextRunAt(when);
-        if (setClock(ctx, when, pending(ctx))) {
-            return when;
+        // 主通道：优先让系统直接把服务拉起来；失败再退回广播闹钟
+        PendingIntent main = Build.VERSION.SDK_INT >= 26 ? svcPending(ctx) : pending(ctx);
+        boolean ok = setClock(ctx, when, main);
+        if (!ok) {
+            ok = setExactSafe(ctx, when, pending(ctx));
         }
-        try {
-            if (Build.VERSION.SDK_INT >= 23) {
-                am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, when, pending(ctx));
-            } else {
-                am.setExact(AlarmManager.RTC_WAKEUP, when, pending(ctx));
-            }
-        } catch (SecurityException e) {
-            try {
-                am.set(AlarmManager.RTC_WAKEUP, when, pending(ctx));
-            } catch (Exception e2) {
-                return -1L;
-            }
-        }
-        return when;
+        // 备通道：主通道被 ROM 冻结吞掉时晚 10 分钟再唤醒一次；同一时段不会重复跑
+        setExactSafe(ctx, when + BACKUP_DELAY_MS, backupPending(ctx));
+        return ok ? when : -1L;
     }
 
     /**
@@ -265,6 +324,8 @@ public final class AlarmScheduler {
         AlarmManager am = (AlarmManager) ctx.getSystemService(Context.ALARM_SERVICE);
         if (am != null) {
             am.cancel(pending(ctx));
+            am.cancel(svcPending(ctx));
+            am.cancel(backupPending(ctx));
         }
         new Config(ctx).setNextRunAt(0L);
     }

@@ -42,7 +42,8 @@ public class RunnerService extends Service {
                     } else if (TaskReceiver.ACTION_TRAVEL.equals(act)) {
                         Runner.runTravelOnly(self);
                     } else {
-                        Runner.runAll(self);
+                        // auto=true：同一个时段只跑一次，主闹钟 / 备用唤醒 / 看门狗 谁先到算谁
+                        Runner.runAll(self, true);
                     }
                 } finally {
                     try {

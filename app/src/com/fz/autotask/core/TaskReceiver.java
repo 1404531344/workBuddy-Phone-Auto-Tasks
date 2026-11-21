@@ -32,7 +32,7 @@ public class TaskReceiver extends BroadcastReceiver {
                     if (ACTION_TRAVEL.equals(act)) {
                         Runner.runTravelOnly(app);
                     } else {
-                        Runner.runAll(app);
+                        Runner.runAll(app, true);
                     }
                 }
             }).start();

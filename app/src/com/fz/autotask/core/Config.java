@@ -23,6 +23,7 @@ public final class Config {
     public static final String K_NEXT_RUN = "next_run_at";
     public static final String K_REPORT_COUNT = "activity_report_count"; // 每次活跃上报的条数
     public static final String K_TIMES_MIGRATED = "times_migrated"; // 单时段 → 多时段的一次性迁移标记
+    public static final String K_DONE_SLOT = "done_slot"; // 最近一次「已跑过」的时段，如 2026-11-22 00:00
 
     public static final String K_AUTO = "auto_on";           // 是否开启「每天自动运行」，默认关
     public static final String K_SELFTEST_AT = "selftest_at";     // 自检闹钟计划时间
@@ -124,6 +125,16 @@ public final class Config {
 
     public void setTimesMigrated(boolean v) {
         sp.edit().putBoolean(K_TIMES_MIGRATED, v).apply();
+    }
+
+    /** 最近一次真正跑完的时段（"yyyy-MM-dd HH:mm"），用来判断有没有漏跑。 */
+    public String doneSlot() {
+        String s = sp.getString(K_DONE_SLOT, "");
+        return s == null ? "" : s;
+    }
+
+    public void setDoneSlot(String slot) {
+        sp.edit().putString(K_DONE_SLOT, slot == null ? "" : slot).apply();
     }
 
     public boolean isEnabled(String moduleId) {

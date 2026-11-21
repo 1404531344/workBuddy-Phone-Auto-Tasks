@@ -18,11 +18,34 @@ public final class Runner {
     }
 
     public static void runAll(Context ctx) {
-        runModules(ctx, null);
+        runAll(ctx, false);
     }
 
-    /** 只跑指定 id 的模块；only 为 null 时跑全部。 */
-    public static void runModules(Context ctx, java.util.Collection<String> only) {
+    /**
+     * @param auto true = 定时任务/补跑触发：同一个时段只跑一次，跑成功才登记；
+     *             false = 用户手动点（一键签到 / 长按模块），永远真跑，不参与去重。
+     */
+    public static void runAll(Context ctx, boolean auto) {
+        if (!auto) {
+            runModules(ctx, null);
+            return;
+        }
+        final Config cfg = new Config(ctx);
+        final String slot = SlotGuard.currentSlot(cfg.times(), System.currentTimeMillis());
+        if (!SlotGuard.begin(cfg, slot)) {
+            Log.i(TAG, "skip auto run: slot " + slot + " already done or running");
+            return;
+        }
+        boolean ok = false;
+        try {
+            ok = runModules(ctx, null);
+        } finally {
+            SlotGuard.end(cfg, ok);
+        }
+    }
+
+    /** 只跑指定 id 的模块；only 为 null 时跑全部。返回 true = 没有模块失败。 */
+    public static boolean runModules(Context ctx, java.util.Collection<String> only) {
         Config cfg = new Config(ctx);
         final java.util.Set<String> sel = only == null ? null : new java.util.HashSet<>(only);
         List<String> lines = new ArrayList<String>();
@@ -70,15 +93,23 @@ public final class Runner {
         cfg.setLast(sb.toString());
         RunLog.append(ctx, head, lines);
 
+        // 手动跑成功也登记这个时段，否则看门狗/打开 App 补跑会紧接着再跑一遍
+        if (failCount == 0 && cfg.autoOn()) {
+            cfg.setDoneSlot(SlotGuard.currentSlot(cfg.times(), System.currentTimeMillis()));
+        }
+
         Notifier.summary(ctx, "自动任务完成", lines.toArray(new String[0]));
 
         // 自动任务开着才排下一次；关闭状态啥都不排
         if (cfg.autoOn()) {
+            // 这一轮已经跑掉了，先把 10 分钟后的备用唤醒撤掉，再排下一轮（下一轮会重新挂上）
+            AlarmScheduler.cancelBackup(ctx);
             AlarmScheduler.scheduleNext(ctx, cfg.times());
         } else {
             AlarmScheduler.cancel(ctx);
         }
         scheduleTravelCheck(ctx, cfg);
+        return failCount == 0;
     }
 
     /** 只跑「旅行」模块（到点回访）：不弹汇总通知，避免一天多次刷屏。 */

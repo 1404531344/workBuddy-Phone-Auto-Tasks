@@ -31,6 +31,7 @@ import com.fz.autotask.core.Config;
 import com.fz.autotask.core.Module;
 import com.fz.autotask.core.ModuleRegistry;
 import com.fz.autotask.core.Runner;
+import com.fz.autotask.core.SlotGuard;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -2525,6 +2526,8 @@ public class MainActivity extends Activity {
         dbg("onResume pending=[" + cfg.pendingState() + "]");
         super.onResume();
         checkSelfTestResult();
+        // 时段被 ROM 冻结吞掉时，打开 App 立刻补跑，不用再手动点「一键签到」
+        autoCatchUp();
         // 从浏览器回来（或 App 被系统回收后重进）时补一次取 token —— 轮询线程可能已经没了
         final java.util.List<String> states = cfg.pendingStates();
         if (states.isEmpty()) {
@@ -2649,6 +2652,45 @@ public class MainActivity extends Activity {
         // 搜索栏下面收紧一点：原来是 16，看着空一大块
         t.setPadding(0, dp(4), 0, dp(6));
         root.addView(t);
+    }
+
+    /**
+     * 时段被 ROM 冻结吞掉时，打开 App 立刻补跑，不用再手动点「一键签到」。
+     * 只在首页补，账号页/模块页不重复补；同一时段只补一次。
+     */
+    private void autoCatchUp() {
+        if (!onHome || !cfg.autoOn() || SlotGuard.isRunning()) {
+            return;
+        }
+        if (!SlotGuard.missed(cfg, System.currentTimeMillis())) {
+            return;
+        }
+        final String slot = SlotGuard.currentSlot(cfg.times(), System.currentTimeMillis());
+        if (slot == null) {
+            return;
+        }
+        final String current = runningModules == null ? "" : runningModules.toString();
+        toast("补跑被系统冻结漏掉的 " + slot + " 时段…");
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    com.fz.autotask.core.Runner.runAll(MainActivity.this, true);
+                } finally {
+                    runOnUiThread(new Runnable() {
+                        @Override
+                        public void run() {
+                            if (onHome) {
+                                refreshingHome = true;
+                                showHome();
+                                refreshingHome = false;
+                                loadStats(true);
+                            }
+                        }
+                    });
+                }
+            }
+        }, "autotask-catchup").start();
     }
 
     private int dp(int v) {

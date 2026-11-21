@@ -46,12 +46,20 @@ public final class AutoCheck {
     /** 闹钟是否真的排上了（能取回同一个 PendingIntent 即视为已注册）。 */
     public static boolean alarmScheduled(Context ctx) {
         try {
+            int flags = PendingIntentFlags.noCreate();
             Intent i = new Intent(ctx, TaskReceiver.class);
             i.setAction(TaskReceiver.ACTION_RUN);
-            int flags = PendingIntentFlags.noCreate();
-            android.app.PendingIntent pi =
-                    android.app.PendingIntent.getBroadcast(ctx, AlarmScheduler.REQ, i, flags);
-            return pi != null;
+            if (android.app.PendingIntent.getBroadcast(ctx, AlarmScheduler.REQ, i, flags) != null) {
+                return true;
+            }
+            // 主通道现在是「闹钟直接拉起前台服务」，也要认
+            Intent s = new Intent(ctx, RunnerService.class);
+            s.setAction(TaskReceiver.ACTION_RUN);
+            if (Build.VERSION.SDK_INT >= 26) {
+                return android.app.PendingIntent.getForegroundService(
+                        ctx, AlarmScheduler.REQ_SVC, s, flags) != null;
+            }
+            return android.app.PendingIntent.getService(ctx, AlarmScheduler.REQ_SVC, s, flags) != null;
         } catch (Exception e) {
             return false;
         }
@@ -78,11 +86,14 @@ public final class AutoCheck {
         b.append(alarmScheduled(ctx) ? "✅ " : "❌ ").append("闹钟已注册");
         b.append(alarmScheduled(ctx) ? "（系统里能查到这条定时）\n" : "（没查到，开关会重排一次）\n");
 
+        b.append("✅ 漏跑自动补：闹钟被系统冻结吞掉时，看门狗或下次打开 App 会立刻补跑\n");
         b.append("✅ 重启后自动恢复（收到开机广播会重新排闹钟）\n\n");
 
-        b.append("⚠️ 还需要你在系统里手动允许两项（App 无法自己开）：\n");
+        b.append("⚠️ 还需要你在系统里手动允许三项（App 无法自己开）：\n");
         b.append("1）手机管家/设置 → 应用管理 → 自动任务 → 自启动 允许\n");
-        b.append("2）同页 → 耗电管理/后台运行 → 允许后台活动（或「无限制」）\n\n");
+        b.append("2）同页 → 耗电管理/后台运行 → 允许后台活动（或「无限制」）\n");
+        b.append("3）设置 → 电池 → 应用速冻（深度睡眠）→ 自动任务 排除\n\n");
+        b.append("不做第 3 项也能跑：冻结只会让「准点」变成「补跑」，结果一样。\n\n");
 
         b.append("开启后 2 分钟会有一次「后台自检」通知：收到了说明不开 App 也能跑；");
         b.append("没收到就按上面两条设置一下。");
